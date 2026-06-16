@@ -138,6 +138,7 @@ async def main() -> None:
         max_pages = int(input_data.get("maxPages") or 0)
         proxy_url = input_data.get("proxyUrl") or None
         hub_names = [h.strip() for h in (input_data.get("hubNames") or [])]
+        hub_canonical = {normalise_game(h).lower() for h in hub_names if h}
 
         async with httpx.AsyncClient(proxy=proxy_url or None, follow_redirects=True) as client:
             page = 1
@@ -155,7 +156,7 @@ async def main() -> None:
                     if rec["event_id"] in seen_ids:
                         continue
                     seen_ids.add(rec["event_id"])
-                    if hub_names and rec["game"] and rec["game"].lower() not in [h.lower() for h in hub_names]:
+                    if hub_canonical and rec["game"] and rec["game"].lower() not in hub_canonical:
                         continue
                     await actor.push_data(rec)
                     total += 1
