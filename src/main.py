@@ -1,258 +1,173 @@
-"""Apify actor: Vavada esports odds via public SPA DOM scraping.
+"""Apify actor: Vavada esports odds via public Altenar widget API.
 
 Implementation notes
 --------------------
-* Vavada renders esports through a widget on https://vavada.com/en/sports#/esports.
-* Hub buttons are visible (e.g., Counter-Strike 23, Dota2 16, Valorant 24).
-* Event card text contains:
-  "{event_id} {DD/MM} • {HH:MM} {league} • {game} {LIVE?} {teamA} {teamB} {odds...}".
-* The actor clicks each hub, extracts leaf event-card texts, and parses them.
-* Vavada blocks some datacenter IPs via Qrator; optional proxyUrl input is supported.
+* Vavada's SPA renders esports from the unauthenticated Altenar widget API.
+* Endpoint: https://sb2frontend-altenar2.biahosted.com/api/WidgetESports/GetESportsEvents
+* Returns events, competitors, championships (leagues), categories (games), markets and odds.
+* The actor paginates through available pages and pushes match-winner records.
 """
 from __future__ import annotations
 
 import asyncio
-import re
-from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from apify import Actor
-from playwright.async_api import async_playwright, Page
+import httpx
 
 from .normalise import normalise_game
 
-START_URL = "https://vavada.com/en/sports#/esports"
+API_BASE = "https://sb2frontend-altenar2.biahosted.com/api"
+EVENTS_URL = f"{API_BASE}/WidgetESports/GetESportsEvents"
 
-GAME_LABELS = [
-    "Counter-Strike",
-    "League of Legends",
-    "Starcraft 2",
-    "Rainbow Six",
-    "Valorant",
-    "Fortnite",
-    "Overwatch",
-    "Dota2",
-    "Crossfire",
-]
+DEFAULT_PARAMS = {
+    "culture": "en-GB",
+    "timezoneOffset": 240,
+    "integration": "vavada",
+    "deviceType": 1,
+    "numFormat": "en-GB",
+    "countryCode": "AG",
+    "sportId": 145,
+    "period": 0,
+    "eventCount": 100,
+}
 
-ODD_RE = re.compile(r"\d+\.\d+")
-TIME_RE = re.compile(r"^\d{2}:\d{2}$")
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+}
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def extract_game(remainder: str) -> tuple[str, str]:
-    for label in GAME_LABELS:
-        if remainder.lower().startswith(label.lower()):
-            return label, remainder[len(label):].strip()
-    tokens = remainder.split()
-    return (tokens[0] if tokens else "Unknown", " ".join(tokens[1:]))
+def index_by_id(items: list[dict], key: str = "id") -> dict[Any, dict]:
+    return {item[key]: item for item in items if key in item}
 
 
-def parse_event_text(text: str) -> dict[str, Any] | None:
-    """Parse a Vavada event card text into structured fields."""
-    parts = [p.strip() for p in text.split("•")]
-    if len(parts) < 3:
-        return None
+def select_match_winner_market(event_market_ids: list[int], markets_index: dict[int, dict]) -> dict | None:
+    for mid in event_market_ids:
+        m = markets_index.get(mid, {})
+        name = (m.get("name") or "").lower()
+        if "match" in name and "winner" in name:
+            return m
+    # Fallback: first market that has two oddIds
+    for mid in event_market_ids:
+        m = markets_index.get(mid, {})
+        odd_ids = m.get("oddIds") or []
+        if len(odd_ids) >= 2:
+            return m
+    return None
 
-    id_date = parts[0].split()
-    if len(id_date) < 2:
-        return None
-    event_id = id_date[0]
-    date_str = id_date[1]  # DD/MM
 
-    rest1_tokens = parts[1].split()
-    if not rest1_tokens or not TIME_RE.match(rest1_tokens[0]):
-        return None
-    time_str = rest1_tokens[0]
-    league = " ".join(rest1_tokens[1:])
+def build_records(data: dict) -> list[dict[str, Any]]:
+    competitors = index_by_id(data.get("competitors", []))
+    champs = index_by_id(data.get("champs", []))
+    categories = index_by_id(data.get("categories", []))
+    markets_index = index_by_id(data.get("markets", []))
+    odds_index = index_by_id(data.get("odds", []), key="id")
 
-    game, remainder = extract_game(parts[2].strip())
+    records: list[dict] = []
+    for event in data.get("events", []):
+        comp_ids = event.get("competitorIds", [])
+        if len(comp_ids) < 2:
+            continue
+        comp_a = competitors.get(comp_ids[0], {})
+        comp_b = competitors.get(comp_ids[1], {})
+        team_a = comp_a.get("name", "").strip()
+        team_b = comp_b.get("name", "").strip()
+        if not team_a or not team_b:
+            continue
 
-    is_live = False
-    rem = remainder
-    if rem.upper().startswith("LIVE"):
-        is_live = True
-        rem = rem[4:].strip()
+        champ = champs.get(event.get("champId"), {})
+        category = categories.get(event.get("catId"), {})
+        league = champ.get("name", "")
+        game = normalise_game(category.get("name", "Unknown"))
 
-    # Split remainder keeping decimal odds as tokens
-    split_parts = ODD_RE.split(rem)
-    odds = [float(o) for o in ODD_RE.findall(rem)]
-    if not odds or len(split_parts) < 2:
-        return None
+        market = select_match_winner_market(event.get("marketIds", []), markets_index)
+        markets = []
+        if market:
+            odd_ids = market.get("oddIds", [])
+            odds = [odds_index.get(oid) for oid in odd_ids if oid in odds_index]
+            # Match-winner: two odds, one per competitor
+            odd_a = next((o for o in odds if o.get("competitorId") == comp_ids[0]), None)
+            odd_b = next((o for o in odds if o.get("competitorId") == comp_ids[1]), None)
+            if odd_a and odd_b:
+                markets = [
+                    {"market_id": "match_winner", "outcome_id": "H", "team": team_a, "odds": odd_a["price"]},
+                    {"market_id": "match_winner", "outcome_id": "A", "team": team_b, "odds": odd_b["price"]},
+                ]
 
-    team_a = split_parts[0].strip()
-    team_b = split_parts[-1].strip()
+        start = event.get("startDate")
+        status = event.get("status")
+        is_live = status is not None and status != 0
 
-    # Parse start time (year inferred)
-    start_time: str | None = None
+        records.append({
+            "event_id": str(event.get("code", event.get("id"))),
+            "brand": "vavada",
+            "sport": "Esports",
+            "game": game,
+            "league": league,
+            "team_a": team_a,
+            "team_b": team_b,
+            "is_live": bool(is_live),
+            "start_time": start,
+            "markets": markets,
+            "scraped_at": now_iso(),
+        })
+
+    return records
+
+
+async def fetch_page(client: httpx.AsyncClient, page: int) -> dict | None:
+    params = {**DEFAULT_PARAMS, "page": page}
     try:
-        today = datetime.now(timezone.utc)
-        dt = datetime.strptime(f"{date_str}/{today.year} {time_str}", "%d/%m/%Y %H:%M")
-        dt = dt.replace(tzinfo=timezone.utc)
-        if dt < today - timedelta(days=1):
-            dt = dt.replace(year=today.year + 1)
-        start_time = dt.isoformat()
-    except Exception:
-        pass
-
-    markets = []
-    if len(odds) >= 2:
-        markets = [
-            {"market_id": "match_winner", "outcome_id": "H", "team": team_a, "odds": odds[0]},
-            {"market_id": "match_winner", "outcome_id": "A", "team": team_b, "odds": odds[-1]},
-        ]
-
-    return {
-        "event_id": event_id,
-        "brand": "vavada",
-        "sport": "Esports",
-        "game": normalise_game(game),
-        "league": league,
-        "team_a": team_a,
-        "team_b": team_b,
-        "is_live": is_live,
-        "start_time": start_time,
-        "markets": markets,
-        "raw_text": text,
-        "scraped_at": now_iso(),
-    }
-
-
-async def accept_cookies(page: Page) -> None:
-    for selector in ["button:has-text('Accept')", "button:has-text('I agree')", "button:has-text('Agree')"]:
-        with suppress(Exception):
-            await page.locator(selector).first.click(timeout=3000)
-            await asyncio.sleep(0.5)
-
-
-async def safe_goto(page: Page, url: str) -> None:
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=90000)
+        resp = await client.get(EVENTS_URL, params=params, headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
     except Exception as exc:
-        Actor.log.warning(f"Navigation to {url} ended with {exc}; continuing anyway")
-    with suppress(Exception):
-        await page.wait_for_load_state("networkidle", timeout=20000)
-
-
-async def extract_hub_labels(page: Page) -> list[str]:
-    labels = await page.eval_on_selector_all(
-        "*",
-        """elements => {
-            const re = /^(Counter-Strike|League of Legends|Starcraft 2|Rainbow Six|Valorant|Fortnite|Overwatch|Dota2|Crossfire)\\s+\\d+$/i;
-            const seen = new Set();
-            return Array.from(elements)
-                .map(el => el.innerText.trim())
-                .filter(t => re.test(t))
-                .filter(t => { if (seen.has(t)) return false; seen.add(t); return true; });
-        }""",
-    )
-    return labels
-
-
-async def extract_event_texts(page: Page) -> list[str]:
-    texts = await page.eval_on_selector_all(
-        "*",
-        """elements => {
-            const re = /^\\d+\\s+\\d{2}\\/\\d{2}\\b/;
-            const seen = new Set();
-            const results = [];
-            for (const el of elements) {
-                if (el.children.length === 0 || el.children.length === 1 && el.children[0].nodeType === 3) {
-                    const t = el.innerText.trim();
-                    if (t && re.test(t) && !seen.has(t)) {
-                        seen.add(t);
-                        results.push(t);
-                    }
-                }
-            }
-            return results;
-        }""",
-    )
-    return texts
-
-
-async def click_hub(page: Page, label: str) -> bool:
-    """Click a hub by its visible label. Returns True if no error."""
-    try:
-        # label is e.g. "Counter-Strike 23"; click element matching the full text
-        loc = page.get_by_text(re.compile(re.escape(label)), exact=False)
-        await loc.first.click(timeout=5000)
-        return True
-    except Exception as exc:
-        Actor.log.warning(f"Could not click hub {label}: {exc}")
-        return False
+        Actor.log.warning(f"API page {page} failed: {exc}")
+        return None
 
 
 async def main() -> None:
     async with Actor() as actor:
         input_data = await actor.get_input() or {}
-        hub_names = [h.strip() for h in (input_data.get("hubNames") or [])]
+        max_pages = int(input_data.get("maxPages") or 0)
         proxy_url = input_data.get("proxyUrl") or None
-        headless = not bool(input_data.get("headful"))
+        hub_names = [h.strip() for h in (input_data.get("hubNames") or [])]
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=headless,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            ctx_kwargs: dict[str, Any] = {
-                "viewport": {"width": 1280, "height": 900},
-                "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            }
-            if proxy_url:
-                ctx_kwargs["proxy"] = {"server": proxy_url}
-            context = await browser.new_context(**ctx_kwargs)
-            page = await context.new_page()
-
-            await safe_goto(page, START_URL)
-            await accept_cookies(page)
-
-            # wait for the SPA to render hubs
-            for _ in range(30):
-                await asyncio.sleep(1)
-                hubs = await extract_hub_labels(page)
-                if hubs:
+        async with httpx.AsyncClient(proxy=proxy_url or None, follow_redirects=True) as client:
+            page = 1
+            total = 0
+            seen_ids: set[str] = set()
+            while True:
+                data = await fetch_page(client, page)
+                if not data:
                     break
 
-            if not hubs:
-                Actor.log.warning("No hubs found; page may be blocked")
+                records = build_records(data)
+                Actor.log.info(f"Page {page}: {len(records)} records")
 
-            if hub_names:
-                hubs = [h for h in hubs if any(hn.lower() in h.lower() for hn in hub_names)]
-
-            Actor.log.info(f"Discovered hubs: {hubs}")
-
-            seen_ids: set[str] = set()
-            total = 0
-
-            for hub in hubs:
-                try:
-                    ok = await click_hub(page, " ".join(hub.split()[:-1]))  # strip count for click matching
-                    if not ok:
+                for rec in records:
+                    if rec["event_id"] in seen_ids:
                         continue
-                    await asyncio.sleep(5)
-                    with suppress(Exception):
-                        await page.wait_for_load_state("networkidle", timeout=15000)
+                    seen_ids.add(rec["event_id"])
+                    if hub_names and rec["game"] and rec["game"].lower() not in [h.lower() for h in hub_names]:
+                        continue
+                    await actor.push_data(rec)
+                    total += 1
 
-                    texts = await extract_event_texts(page)
-                    Actor.log.info(f"Hub {hub}: {len(texts)} raw event texts")
-                    for txt in texts:
-                        rec = parse_event_text(txt)
-                        if not rec or rec["event_id"] in seen_ids:
-                            continue
-                        seen_ids.add(rec["event_id"])
-                        await actor.push_data(rec)
-                        total += 1
-                except Exception as exc:
-                    Actor.log.exception(f"Hub {hub} failed: {exc}")
+                page_count = data.get("pageCount", 0)
+                if page_count and page >= page_count:
+                    break
+                if max_pages and page >= max_pages:
+                    break
+                page += 1
 
-            await context.close()
-            await browser.close()
-            Actor.log.info(f"Finished; pushed {total} events total")
+        Actor.log.info(f"Finished; pushed {total} events total")
 
 
 if __name__ == "__main__":

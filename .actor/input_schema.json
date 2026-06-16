@@ -4,27 +4,27 @@
     "schemaVersion": 1,
     "properties": {
         "hubNames": {
-            "title": "Hub names to scrape",
+            "title": "Game names to scrape",
             "type": "array",
-            "description": "If empty, scrape all discovered hubs. Example: [\"Counter-Strike\", \"Dota2\"]",
+            "description": "If empty, scrape all games. Example: [\"Dota 2\", \"Counter-Strike 2\"]",
             "default": [],
             "editor": "json",
             "items": {
                 "type": "string"
             }
         },
+        "maxPages": {
+            "title": "Maximum pages",
+            "type": "integer",
+            "description": "0 = all pages.",
+            "default": 0
+        },
         "proxyUrl": {
             "title": "Proxy URL",
             "type": "string",
-            "description": "Optional proxy for Playwright context, e.g. http://user:pass@host:port. Vavada blocks some datacenter IPs.",
+            "description": "Optional proxy, e.g. http://user:pass@host:port.",
             "default": "",
             "editor": "textfield"
-        },
-        "headful": {
-            "title": "Run headful",
-            "type": "boolean",
-            "description": "Launch a visible browser (useful for debugging).",
-            "default": false
         }
     },
     "required": []

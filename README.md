@@ -1,16 +1,20 @@
 # Vavada esports odds scraper
 
-Public Vavada esports odds via DOM scraping.
+Vavada esports odds via the public Altenar widget API.
+
+## Source API
+
+- `https://sb2frontend-altenar2.biahosted.com/api/WidgetESports/GetESportsEvents`
+- Integrator: `vavada`, sportId `145`.
 
 ## Flow
 
-1. Open `https://vavada.com/en/sports#/esports`.
-2. Wait for the widget SPA to render hub buttons (Counter-Strike, Dota2, etc.).
-3. Click each hub, extract visible event-card texts.
-4. Parse event texts for id, league, game, teams, and decimal odds.
+1. Fetch paginated event list (events, competitors, champs/leagues, categories/games, markets, odds).
+2. Select the `Match winner` market for each event.
+3. Map odds to competitors by `competitorId`.
 
 ## Inputs
 
-- `hubNames`: array of hub game names to limit scraping (e.g. `["Counter-Strike"]`).
-- `proxyUrl`: optional proxy to bypass Qrator IP blocks.
-- `headful`: debug mode.
+- `hubNames`: array of game names to limit scraping (e.g. `["Dota 2"]`).
+- `maxPages`: integer page limit (0 = all pages).
+- `proxyUrl`: optional proxy URL.
