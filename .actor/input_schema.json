@@ -1,0 +1,30 @@
+{
+    "title": "Vavada esports odds input",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "hubNames": {
+            "title": "Hub names to scrape",
+            "type": "array",
+            "description": "If empty, scrape all discovered hubs. Example: [\"Counter-Strike\", \"Dota2\"]",
+            "default": [],
+            "editor": "json",
+            "items": {
+                "type": "string"
+            }
+        },
+        "proxyUrl": {
+            "title": "Proxy URL",
+            "type": "string",
+            "description": "Optional proxy for Playwright context, e.g. http://user:pass@host:port. Vavada blocks some datacenter IPs.",
+            "default": ""
+        },
+        "headful": {
+            "title": "Run headful",
+            "type": "boolean",
+            "description": "Launch a visible browser (useful for debugging).",
+            "default": false
+        }
+    },
+    "required": []
+}

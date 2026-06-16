@@ -1,0 +1,10 @@
+{
+  "actorSpecification": 1,
+  "name": "esb-odds-vavada",
+  "version": "1.0",
+  "buildTag": "latest",
+  "environmentVariables": {},
+  "title": "Vavada esports odds",
+  "description": "Scrapes public esports match-winner odds from Vavada via DOM event cards.",
+  "input": "./input_schema.json"
+}
