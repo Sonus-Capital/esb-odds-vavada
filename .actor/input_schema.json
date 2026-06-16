@@ -17,7 +17,8 @@
             "title": "Proxy URL",
             "type": "string",
             "description": "Optional proxy for Playwright context, e.g. http://user:pass@host:port. Vavada blocks some datacenter IPs.",
-            "default": ""
+            "default": "",
+            "editor": "textfield"
         },
         "headful": {
             "title": "Run headful",
