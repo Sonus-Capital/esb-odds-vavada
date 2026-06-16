@@ -1,7 +1,7 @@
 {
   "actorSpecification": 1,
   "name": "esb-odds-vavada",
-  "version": "1.2",
+  "version": "1.3",
   "buildTag": "latest",
   "environmentVariables": {},
   "title": "Vavada esports odds",

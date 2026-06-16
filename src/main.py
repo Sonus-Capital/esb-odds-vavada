@@ -62,7 +62,8 @@ def select_match_winner_market(event_market_ids: list[int], markets_index: dict[
     return None
 
 
-def build_records(data: dict) -> list[dict[str, Any]]:
+def build_schema_records(data: dict) -> list[dict[str, Any]]:
+    """Convert Vavada Altenar API response into schema-locked records."""
     competitors = index_by_id(data.get("competitors", []))
     champs = index_by_id(data.get("champs", []))
     categories = index_by_id(data.get("categories", []))
@@ -76,46 +77,47 @@ def build_records(data: dict) -> list[dict[str, Any]]:
             continue
         comp_a = competitors.get(comp_ids[0], {})
         comp_b = competitors.get(comp_ids[1], {})
-        team_a = comp_a.get("name", "").strip()
-        team_b = comp_b.get("name", "").strip()
-        if not team_a or not team_b:
+        team1 = comp_a.get("name", "").strip()
+        team2 = comp_b.get("name", "").strip()
+        if not team1 or not team2:
             continue
 
         champ = champs.get(event.get("champId"), {})
         category = categories.get(event.get("catId"), {})
-        league = champ.get("name", "")
-        game = normalise_game(category.get("name", "Unknown"))
+        tournament_name = champ.get("name", "")
+        game_raw = category.get("name", "Unknown")
+        game = normalise_game(game_raw)
 
         market = select_match_winner_market(event.get("marketIds", []), markets_index)
-        markets = []
+        price_team1 = price_team2 = price_draw = None
         if market:
             odd_ids = market.get("oddIds", [])
             odds = [odds_index.get(oid) for oid in odd_ids if oid in odds_index]
-            # Match-winner: two odds, one per competitor
             odd_a = next((o for o in odds if o.get("competitorId") == comp_ids[0]), None)
             odd_b = next((o for o in odds if o.get("competitorId") == comp_ids[1]), None)
             if odd_a and odd_b:
-                markets = [
-                    {"market_id": "match_winner", "outcome_id": "H", "team": team_a, "odds": odd_a["price"]},
-                    {"market_id": "match_winner", "outcome_id": "A", "team": team_b, "odds": odd_b["price"]},
-                ]
+                price_team1 = odd_a["price"]
+                price_team2 = odd_b["price"]
 
-        start = event.get("startDate")
         status = event.get("status")
         is_live = status is not None and status != 0
 
         records.append({
-            "event_id": str(event.get("code", event.get("id"))),
-            "brand": "vavada",
-            "sport": "Esports",
+            "bookmaker": "vavada",
+            "game_raw": game_raw,
             "game": game,
-            "league": league,
-            "team_a": team_a,
-            "team_b": team_b,
-            "is_live": bool(is_live),
-            "start_time": start,
-            "markets": markets,
+            "tournament_name": tournament_name,
+            "team1": team1,
+            "team2": team2,
+            "match_start_time": event.get("startDate"),
+            "match_url": f"https://vavada.com/en/sports#/event/{event.get('id')}",
+            "market_name": "Match Winner",
+            "price_team1": price_team1,
+            "price_team2": price_team2,
+            "price_draw": price_draw,
             "scraped_at": now_iso(),
+            "is_live": bool(is_live),
+            "event_id": str(event.get("code", event.get("id"))),
         })
 
     return records
@@ -149,7 +151,7 @@ async def main() -> None:
                 if not data:
                     break
 
-                records = build_records(data)
+                records = build_schema_records(data)
                 Actor.log.info(f"Page {page}: {len(records)} records")
 
                 for rec in records:
@@ -157,6 +159,9 @@ async def main() -> None:
                         continue
                     seen_ids.add(rec["event_id"])
                     if hub_canonical and rec["game"] and rec["game"].lower() not in hub_canonical:
+                        continue
+                    # Only emit records that have match-winner odds
+                    if rec.get("price_team1") is None or rec.get("price_team2") is None:
                         continue
                     await actor.push_data(rec)
                     total += 1
